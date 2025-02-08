@@ -360,7 +360,7 @@ inline void write_packed_float4(device float* arr, int idx, float4 val) {
 // kernel function for projecting each gaussian on device
 // each thread processes one gaussian 
 kernel void project_gaussians_forward_kernel(
-    constant int& num_points,
+    constant uint& num_points,
     constant float* means3d, // float3
     constant float* scales, // float3
     constant float& glob_scale,
@@ -502,7 +502,7 @@ kernel void nd_rasterize_forward_kernel(
             break;
         }
         const float vis = alpha * T;
-        for (int c = 0; c < channels; ++c) {
+        for (uint c = 0; c < channels; ++c) {
             out_img[channels * pix_id + c] += colors[channels * g + c] * vis;
         }
         T = next_T;
@@ -512,7 +512,7 @@ kernel void nd_rasterize_forward_kernel(
         (idx == range.y)
             ? idx - 1
             : idx; // index of in bin of last gaussian in this pixel
-    for (int c = 0; c < channels; ++c) {
+    for (uint c = 0; c < channels; ++c) {
         out_img[channels * pix_id + c] += T * background[c];
     }
 }
@@ -525,7 +525,7 @@ void sh_coeffs_to_color(
 ) {
     // Expects v_colors to be len CHANNELS
     // and v_coeffs to be num_bases * CHANNELS
-    for (int c = 0; c < CHANNELS; ++c) {
+    for (uint c = 0; c < CHANNELS; ++c) {
         colors[c] = SH_C0 * coeffs[c];
     }
     if (degree < 1) {
@@ -547,7 +547,7 @@ void sh_coeffs_to_color(
     float zz = z * z;
     // expects CHANNELS * num_bases coefficients
     // supports up to num_bases = 25
-    for (int c = 0; c < CHANNELS; ++c) {
+    for (uint c = 0; c < CHANNELS; ++c) {
         colors[c] += SH_C1 * (-y * coeffs[1 * CHANNELS + c] +
                               z * coeffs[2 * CHANNELS + c] -
                               x * coeffs[3 * CHANNELS + c]);
@@ -600,7 +600,7 @@ void sh_coeffs_to_color_vjp(
     // Expects v_colors to be len CHANNELS
     // and v_coeffs to be num_bases * CHANNELS
     #pragma unroll
-    for (int c = 0; c < CHANNELS; ++c) {
+    for (uint c = 0; c < CHANNELS; ++c) {
         v_coeffs[c] = SH_C0 * v_colors[c];
     }
     if (degree < 1) {
@@ -622,7 +622,7 @@ void sh_coeffs_to_color_vjp(
     float zz = z * z;
     
     #pragma unroll
-    for (int c = 0; c < CHANNELS; ++c) {
+    for (uint c = 0; c < CHANNELS; ++c) {
         float v1 = -SH_C1 * y;
         float v2 = SH_C1 * z;
         float v3 = -SH_C1 * x;
@@ -730,7 +730,7 @@ kernel void compute_sh_backward_kernel(
 // kernel to map each intersection from tile ID and depth to a gaussian
 // writes output to isect_ids and gaussian_ids
 kernel void map_gaussian_to_intersects_kernel(
-    constant int& num_points,
+    constant uint& num_points,
     constant float* xys, // float2
     constant float* depths,
     constant int* radii,
@@ -756,8 +756,8 @@ kernel void map_gaussian_to_intersects_kernel(
     int32_t cur_idx = (idx == 0) ? 0 : num_tiles_hit[idx - 1];
     // printf("point %d starting at %d\n", idx, cur_idx);
     int64_t depth_id = (int64_t) * (constant int32_t *)&(depths[idx]);
-    for (int i = tile_min.y; i < tile_max.y; ++i) {
-        for (int j = tile_min.x; j < tile_max.x; ++j) {
+    for (uint i = tile_min.y; i < tile_max.y; ++i) {
+        for (uint j = tile_min.x; j < tile_max.x; ++j) {
             // isect_id is tile ID and depth as int32
             int64_t tile_id = i * tile_bounds.x + j; // tile within image
             isect_ids[cur_idx] = (tile_id << 32) | depth_id; // tile | depth id
@@ -772,7 +772,7 @@ kernel void map_gaussian_to_intersects_kernel(
 // expect that intersection IDs are sorted by increasing tile ID
 // i.e. intersections of a tile are in contiguous chunks
 kernel void get_tile_bin_edges_kernel(
-    constant int& num_intersects, 
+    constant uint& num_intersects, 
     constant int64_t* isect_ids_sorted, 
     device int* tile_bins, // int2
     uint idx [[thread_position_in_grid]]
@@ -781,10 +781,10 @@ kernel void get_tile_bin_edges_kernel(
         return;
     // save the indices where the tile_id changes
     int32_t cur_tile_idx = (int32_t)(isect_ids_sorted[idx] >> 32);
-    if (idx == 0 || idx == num_intersects - 1) {
+    if (idx == 0 || idx == (uint)(num_intersects - 1)) {
         if (idx == 0)
             write_packed_int2x(tile_bins, cur_tile_idx, 0);
-        if (idx == num_intersects - 1)
+        if (idx == (uint)(num_intersects - 1))
             write_packed_int2y(tile_bins, cur_tile_idx, num_intersects);
         return;
     }
@@ -812,31 +812,29 @@ inline int warp_reduce_all_or(int val, const int warp_size) {
     return val;
 }
 
-inline float warp_reduce_sum(float val, const int warp_size, const uint lane) {
-    for (int offset = warp_size / 2; offset > 0; offset /= 2) {
-        float other = 0.0f;
-        if (lane + offset <= warp_size)
-            other = simd_shuffle_xor(val, offset);
-        val += other;
-    }
+inline float warp_reduce_sum(float val, const int warp_size) {
+    for ( int offset = warp_size / 2; offset > 0; offset /= 2 )
+        val += simd_shuffle_and_fill_down(val, 0., offset);
+
     return val;
 }
 
-inline float3 warpSum3(float3 val, const int warp_size, const uint lane) {
-    val.x = warp_reduce_sum(val.x, warp_size, lane);
-    val.y = warp_reduce_sum(val.y, warp_size, lane);
-    val.z = warp_reduce_sum(val.z, warp_size, lane);
+inline float3 warpSum3(float3 val, uint warp_size){
+    val.x = warp_reduce_sum(val.x, warp_size);
+    val.y = warp_reduce_sum(val.y, warp_size);
+    val.z = warp_reduce_sum(val.z, warp_size);
     return val;
 }
 
-inline float2 warpSum2(float2 val, const int warp_size, const uint lane) {
-    val.x = warp_reduce_sum(val.x, warp_size, lane);
-    val.y = warp_reduce_sum(val.y, warp_size, lane);
+inline float2 warpSum2(float2 val, uint warp_size){
+    val.x = warp_reduce_sum(val.x, warp_size);
+    val.y = warp_reduce_sum(val.y, warp_size);
     return val;
 }
 
-inline float warpSum(float val, const int warp_size, const uint lane) {
-    return warp_reduce_sum(val, warp_size, lane);
+inline float warpSum(float val, uint warp_size){
+    val = warp_reduce_sum(val, warp_size);
+    return val;
 }
 
 kernel void rasterize_backward_kernel(
@@ -928,9 +926,11 @@ kernel void rasterize_backward_kernel(
         // process gaussians in the current batch for this pixel
         // 0 index is the furthest back gaussian in the batch
         for (int t = max(0,batch_end - warp_bin_final); t < batch_size; ++t) {
-            int valid = inside;
+            int valid;
             if (batch_end - t > bin_final) {
                 valid = 0;
+            } else {
+                valid = inside;
             }
             float alpha;
             float opac;
@@ -983,8 +983,6 @@ kernel void rasterize_backward_kernel(
                 v_alpha += -T_final * ra * background[2] * v_out.z;
                 // update the running sum
                 buffer.x += rgb.x * fac;
-                buffer.y += rgb.y * fac;
-                buffer.z += rgb.z * fac;
 
                 const float v_sigma = -opac * vis * v_alpha;
                 v_conic_local = {0.5f * v_sigma * delta.x * delta.x, 
@@ -995,10 +993,10 @@ kernel void rasterize_backward_kernel(
                 v_opacity_local = vis * v_alpha;
             }
 
-            v_rgb_local = warpSum3(v_rgb_local, warp_size, wr);
-            v_conic_local = warpSum3(v_conic_local, warp_size, wr);
-            v_xy_local = warpSum2(v_xy_local, warp_size, wr);
-            v_opacity_local = warpSum(v_opacity_local, warp_size, wr);
+            v_rgb_local = warpSum3(v_rgb_local, warp_size);
+            v_conic_local = warpSum3(v_conic_local, warp_size);
+            v_xy_local = warpSum2(v_xy_local, warp_size);
+            v_opacity_local = warpSum(v_opacity_local, warp_size);
 
             if (wr == 0) {
                 int32_t g = id_batch[t];
@@ -1102,7 +1100,7 @@ kernel void nd_rasterize_backward_kernel(
         // update v_rgb for this gaussian
         const float fac = alpha * T;
         float v_alpha = 0.f;
-        for (int c = 0; c < channels; ++c) {
+        for (uint c = 0; c < channels; ++c) {
             // gradient wrt rgb
             atomic_fetch_add_explicit(v_rgb + channels * g + c, fac * v_out[c], memory_order_relaxed);
             // contribution from this pixel
@@ -1264,16 +1262,15 @@ inline float4 quat_to_rotmat_vjp(const float4 quat, const float3x3 v_R) {
     // v_R is COLUMN MAJOR
     // w element stored in x field
     v_quat.x =
-        2.f * (
-                  // v_quat.w = 2.f * (
-                  x * (v_R[1][2] - v_R[2][1]) + y * (v_R[2][0] - v_R[0][2]) +
-                  z * (v_R[0][1] - v_R[1][0])
-              );
+        2.f *
+        (
+            x * (v_R[1][2] - v_R[2][1]) + y * (v_R[2][0] - v_R[0][2]) +
+            z * (v_R[0][1] - v_R[1][0])
+        );
     // x element in y field
     v_quat.y =
         2.f *
         (
-            // v_quat.x = 2.f * (
             -2.f * x * (v_R[1][1] + v_R[2][2]) + y * (v_R[0][1] + v_R[1][0]) +
             z * (v_R[0][2] + v_R[2][0]) + w * (v_R[1][2] - v_R[2][1])
         );
@@ -1281,7 +1278,6 @@ inline float4 quat_to_rotmat_vjp(const float4 quat, const float3x3 v_R) {
     v_quat.z =
         2.f *
         (
-            // v_quat.y = 2.f * (
             x * (v_R[0][1] + v_R[1][0]) - 2.f * y * (v_R[0][0] + v_R[2][2]) +
             z * (v_R[1][2] + v_R[2][1]) + w * (v_R[2][0] - v_R[0][2])
         );
@@ -1289,7 +1285,6 @@ inline float4 quat_to_rotmat_vjp(const float4 quat, const float3x3 v_R) {
     v_quat.w =
         2.f *
         (
-            // v_quat.z = 2.f * (
             x * (v_R[0][2] + v_R[2][0]) + y * (v_R[1][2] + v_R[2][1]) -
             2.f * z * (v_R[0][0] + v_R[1][1]) + w * (v_R[0][1] - v_R[1][0])
         );
@@ -1340,7 +1335,7 @@ void scale_rot_to_cov3d_vjp(
 }
 
 kernel void project_gaussians_backward_kernel(
-    constant int& num_points,
+    constant uint& num_points,
     constant float* means3d, // float3
     constant float* scales, // float3
     constant float& glob_scale,
